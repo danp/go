@@ -117,3 +117,27 @@ func TestCompareStrings(t *testing.T) {
 		lastLen = len
 	}
 }
+
+func BenchmarkCompare(b *testing.B) {
+	x := Repeat("x", 10_000)
+	x1 := x + "1"
+	y := Repeat("y", 10_000)
+
+	for i := 0; i < b.N; i++ {
+		if Compare(x, y) != -1 {
+			b.Fatal("bad")
+		}
+		if Compare(x, x1) != -1 {
+			b.Fatal("bad")
+		}
+		if Compare(x, x) != 0 {
+			b.Fatal("bad")
+		}
+		if Compare(y, x) != 1 {
+			b.Fatal("bad")
+		}
+		if Compare(x1, x) != 1 {
+			b.Fatal("bad")
+		}
+	}
+}

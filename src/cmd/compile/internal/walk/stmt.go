@@ -7,6 +7,9 @@ package walk
 import (
 	"cmd/compile/internal/base"
 	"cmd/compile/internal/ir"
+	"cmd/compile/internal/typecheck"
+	"cmd/compile/internal/types"
+	"go/constant"
 )
 
 // The result of walkStmt MUST be assigned back to n, e.g.
@@ -128,8 +131,9 @@ func walkStmt(n ir.Node) ir.Node {
 		return walkFor(n)
 
 	case ir.OIF:
+		init := n.Init()
 		n := n.(*ir.IfStmt)
-		return walkIf(n)
+		return walkIf(n, &init)
 
 	case ir.ORETURN:
 		n := n.(*ir.ReturnStmt)
@@ -221,9 +225,92 @@ func walkGoDefer(n *ir.GoDeferStmt) ir.Node {
 }
 
 // walkIf walks an OIF node.
-func walkIf(n *ir.IfStmt) ir.Node {
+func walkIf(n *ir.IfStmt, init *ir.Nodes) ir.Node {
+	if x, y, ok := isThreeWayStringCompare(n); ok {
+		r := ir.NewReturnStmt(base.Pos, nil)
+		c := mkcall("cmpstring", types.Types[types.TINT], init, typecheck.Conv(x, types.Types[types.TSTRING]), typecheck.Conv(y, types.Types[types.TSTRING]))
+		r.Results.Append(c)
+		r1 := walkStmt(typecheck.Stmt(r))
+		return r1
+	}
+
 	n.Cond = walkExpr(n.Cond, n.PtrInit())
 	walkStmtList(n.Body)
 	walkStmtList(n.Else)
 	return n
+}
+
+// isThreeWayStringCompare reports whether n is a three-way compare
+// with the form:
+//
+//	if x < y {
+//	    return -1
+//	} else if x > y {
+//	    return 1
+//	} else {
+//	    return 0
+//	}
+//
+// where x and y are strings.
+func isThreeWayStringCompare(n *ir.IfStmt) (x, y ir.Node, ok bool) {
+	// if x < y { return -1
+	if n.Cond.Op() != ir.OLT {
+		return nil, nil, false
+	}
+	cond := n.Cond.(*ir.BinaryExpr)
+	x, y = cond.X, cond.Y
+	if !x.Type().IsString() || !y.Type().IsString() {
+		return nil, nil, false
+	}
+	if len(n.Body) != 1 || len(n.Else) != 1 {
+		return nil, nil, false
+	}
+	if !isReturnV(n.Body[0], -1) {
+		return nil, nil, false
+	}
+
+	// } else if x > y { return 1
+	if n.Else[0].Op() != ir.OIF {
+		return nil, nil, false
+	}
+	n = n.Else[0].(*ir.IfStmt)
+	if n.Cond.Op() != ir.OGT {
+		return nil, nil, false
+	}
+	cond = n.Cond.(*ir.BinaryExpr)
+	if !ir.SameSafeExpr(x, cond.X) || !ir.SameSafeExpr(y, cond.Y) {
+		return nil, nil, false
+	}
+	if len(n.Body) != 1 || len(n.Else) != 1 {
+		return nil, nil, false
+	}
+	if !isReturnV(n.Body[0], 1) {
+		return nil, nil, false
+	}
+
+	// } else { return 0 }
+	if !isReturnV(n.Else[0], 0) {
+		return nil, nil, false
+	}
+
+	return x, y, true
+}
+
+// isReturnV reports whether n is a return statement returning constant v.
+func isReturnV(n ir.Node, v int64) bool {
+	if n.Op() != ir.ORETURN {
+		return false
+	}
+	ret := n.(*ir.ReturnStmt)
+	if len(ret.Results) != 1 {
+		return false
+	}
+	if !ir.IsConst(ret.Results[0], constant.Int) {
+		return false
+	}
+	cv, ok := constant.Int64Val(ret.Results[0].Val())
+	if !ok {
+		return false
+	}
+	return cv == v
 }
